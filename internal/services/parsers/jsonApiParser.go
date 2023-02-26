@@ -34,7 +34,7 @@ type JsonField struct {
 }
 
 func JsonApiParser(parseLimit int, client *http.Client, forceMode bool) {
-	fmt.Println("******Hello! I'm parser serbiarus******")
+	fmt.Println("******Hello! I'm parser vmeste******")
 	db, _ := services.InitDb(config.DbConfig(), config.DbSchema())
 	defer db.Close()
 

@@ -45,7 +45,7 @@ type OfferDataStruct struct {
 }
 
 func HtmlParser(streamLimit int, client *http.Client, forceMode bool, dataStruct interface{}) {
-	fmt.Println("******Hello! I'm parser vmeste******")
+	fmt.Println("******Hello! I'm parser serbiarus******")
 	db, _ := services.InitDb(config.DbConfig(), config.DbSchema())
 	defer db.Close()
 
