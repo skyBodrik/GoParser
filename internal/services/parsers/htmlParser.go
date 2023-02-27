@@ -1,8 +1,6 @@
 package parsers
 
 import (
-	"crypto/md5"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"goParser/internal/config"
@@ -44,8 +42,16 @@ type OfferDataStruct struct {
 	Avatar      string   `regexp:"1:(?is)<img class=\"user_small_avatar\" data-src=\"(.+?)\">"`
 }
 
-func HtmlParser(streamLimit int, client *http.Client, forceMode bool, dataStruct interface{}) {
-	fmt.Println("******Hello! I'm parser serbiarus******")
+type HtmlParserConfigStruct struct {
+	ParserName string `example:"Serbiarus"`
+	TargetUrl  string `example:"https://serbiarus.com/country/serbia/offers/page-%d.html"`
+	PageStart  int    `example:"1"`
+	FindRegexp string `example:"(?is)class=\"offer_list_block\".*?<a href=\"(/country.+?)\""`
+}
+
+func HtmlParser(streamLimit int, client *http.Client, forceMode bool, dataStruct interface{}, configStruct HtmlParserConfigStruct) {
+	fmt.Printf("******Hello! I'm parser %s******", configStruct.ParserName)
+	//return
 	db, _ := services.InitDb(config.DbConfig(), config.DbSchema())
 	defer db.Close()
 
@@ -53,11 +59,17 @@ func HtmlParser(streamLimit int, client *http.Client, forceMode bool, dataStruct
 	var rowCount int64 = 0
 	var offersUrls []string
 
+	var duplicateMapCheck map[string]bool = make(map[string]bool)
+	var duplicateMap map[string]bool = make(map[string]bool)
+	var duplicateCounter int = 0
+	insertedCounters := sync.Map{} //make(syncmap.Map[int]chan int, 1)
+	totalCounters := sync.Map{}    //make(map[int]chan int, 1)
+
 	// Бежим по страницам
-	for page := 1; true; page++ {
+	for page := configStruct.PageStart; true; page++ {
 		// Запрос посылаем на сервер в однопотоке, чтобы не перегружать сеть и сервер
 		fmt.Printf("Start processing page %d\n", page)
-		var targetUrl string = fmt.Sprintf("https://serbiarus.com/country/serbia/offers/page-%d.html", page)
+		var targetUrl string = fmt.Sprintf(configStruct.TargetUrl, page)
 
 		// Форимируем запрос
 		request, err := http.NewRequest("GET", targetUrl, nil)
@@ -78,7 +90,7 @@ func HtmlParser(streamLimit int, client *http.Client, forceMode bool, dataStruct
 		}
 
 		content := string(data)
-		re, _ := regexp.Compile(`(?is)class="offer_list_block".*?<a href="(/country.+?)"`)
+		re, _ := regexp.Compile(configStruct.FindRegexp)
 		res := re.FindAllStringSubmatch(content, -1)
 
 		var haveOffers bool = false
@@ -98,14 +110,36 @@ func HtmlParser(streamLimit int, client *http.Client, forceMode bool, dataStruct
 
 	// Бежим по предложениям асинхронно
 	var wg sync.WaitGroup
+	var mutex = &sync.RWMutex{}
 	for streamId := 0; streamId < streamLimit; streamId++ {
+		insertedCounters.Store(streamId, make(chan int, 1))
+		totalCounters.Store(streamId, make(chan int, 1))
+		insertedCounterCurrent, _ := insertedCounters.Load(streamId)
+		totalCounterCurrent, _ := totalCounters.Load(streamId)
+
 		wg.Add(1)
-		go func(streamId int) {
+		go func(streamId int, insertedCounter chan int, totalCounter chan int) {
 			defer wg.Done()
+			insertedCount := 0
+			totalCount := 0
 			for _, currentOfferUrl := range dataForStreams[streamId] {
-				rowCount++
-				offerHash := md5.New()
-				offerHashId := hex.EncodeToString(offerHash.Sum([]byte(currentOfferUrl)))
+				totalCount++
+				re, _ := regexp.Compile(`(?is)offers/(\d+)-`)
+				res := re.FindAllStringSubmatch(currentOfferUrl, 2)
+				//offerHash := md5.New()
+				offerHashId := res[0][1] //hex.EncodeToString(offerHash.Sum([]byte(currentOfferUrl)))
+				//fmt.Println(offerHashId)
+
+				// Проверяем на дубли
+				mutex.Lock()
+				_, isDuplicate := duplicateMapCheck[offerHashId]
+				if isDuplicate {
+					duplicateCounter++
+					duplicateMap[offerHashId] = true
+				}
+				duplicateMapCheck[offerHashId] = true
+				mutex.Unlock()
+
 				if !forceMode && services.CheckExistsById(db, STORAGE_TABLE, offerHashId) {
 					fmt.Printf("Stream %d: Skip offer %s. Already parsed!\n", streamId, currentOfferUrl)
 					continue
@@ -195,17 +229,28 @@ func HtmlParser(streamLimit int, client *http.Client, forceMode bool, dataStruct
 
 				if insetResult != nil {
 					inserted, _ := insetResult.RowsAffected()
-					rowInsertedCount += inserted
+					insertedCount += int(inserted)
 				}
 
 				//break // пока хватит одной страницы
 			}
-		}(streamId)
+
+			insertedCounter <- insertedCount
+			totalCounter <- totalCount
+		}(streamId, insertedCounterCurrent.(chan int), totalCounterCurrent.(chan int))
 	}
 
 	fmt.Printf("Waiting... ")
+	insertedCounters.Range(func(key, value any) bool {
+		rowInsertedCount += int64(<-value.(chan int))
+		return true
+	})
+	totalCounters.Range(func(key, value any) bool {
+		rowCount += int64(<-value.(chan int))
+		return true
+	})
 	wg.Wait()
-	fmt.Printf("Stored %d records from %d\n", rowInsertedCount, rowCount)
+	fmt.Printf("Stored %d records. Duplicates %d. Total %d\n", rowInsertedCount, duplicateCounter, rowCount)
 }
 
 func splitData(data []string, count int) [][]string {

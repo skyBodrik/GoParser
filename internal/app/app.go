@@ -6,6 +6,7 @@ import (
 	_ "github.com/lib/pq"
 	"goParser/internal/services"
 	"goParser/internal/services/parsers"
+	"golang.org/x/net/proxy"
 	"net/http"
 	"os"
 	"strings"
@@ -22,10 +23,17 @@ func Run() {
 	flag.Parse()
 
 	if *useProxyFlag {
-		proxyString, exists := os.LookupEnv("PROXY_STRING")
+		proxyAddr, exists := os.LookupEnv("PROXY_ADDR")
 		if exists {
-			fmt.Printf("Use proxy %s is active!", proxyString)
-			client, _ = services.ProxyCon(proxyString, 30)
+			fmt.Printf("Use proxy %s is active!\n", proxyAddr)
+			proxyAuthString, existsAuth := os.LookupEnv("PROXY_AUTH")
+			if existsAuth {
+				authData := strings.Split(proxyAuthString, ":")
+				proxyAuth := proxy.Auth{User: authData[0], Password: authData[1]}
+				client, _ = services.ProxyCon(proxyAddr, &proxyAuth, 30)
+			} else {
+				client, _ = services.ProxyCon(proxyAddr, nil, 30)
+			}
 		}
 	}
 
@@ -34,7 +42,12 @@ func Run() {
 	for _, parserName := range parsersListArray {
 		switch strings.Trim(parserName, " ") {
 		case "serbiarus":
-			parsers.HtmlParser(*streamCount, client, *useForceFlag, parsers.OfferDataStruct{})
+			parsers.HtmlParser(*streamCount, client, *useForceFlag, parsers.OfferDataStruct{}, parsers.HtmlParserConfigStruct{
+				"Serbiarus",
+				"https://serbiarus.com/country/serbia/offers/page-%d.html",
+				1,
+				`(?is)class="offer_list_block".*?<a href="(/country.+?)"`,
+			})
 		case "vmeste":
 			parsers.JsonApiParser(100, client, *useForceFlag)
 		default:

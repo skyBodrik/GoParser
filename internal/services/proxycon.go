@@ -1,21 +1,20 @@
 package services
 
 import (
+	"golang.org/x/net/proxy"
+	"log"
 	"net/http"
-	"net/url"
 	"time"
 )
 
-func ProxyCon(proxyUrl string, timeout time.Duration) (*http.Client, error) {
-	//creating the proxyURL
-	proxyURL, err := url.Parse(proxyUrl)
-
+func ProxyCon(proxyAddr string, proxyAuth *proxy.Auth, timeout time.Duration) (*http.Client, error) {
+	dialer, err := proxy.SOCKS5("tcp", proxyAddr, proxyAuth, proxy.Direct)
 	if err != nil {
-		return nil, err
+		log.Fatalln("can't connect to the proxy:", err)
 	}
 
 	transport := &http.Transport{
-		Proxy: http.ProxyURL(proxyURL),
+		Dial: dialer.Dial,
 	}
 
 	//adding the Transport object to the http Client

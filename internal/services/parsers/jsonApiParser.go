@@ -11,7 +11,6 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
-	"time"
 )
 
 type RootField struct {
@@ -41,8 +40,11 @@ func JsonApiParser(parseLimit int, client *http.Client, forceMode bool) {
 	var cursor int = 0
 	var rowInsertedCount int64 = 0
 	var rowCount int64 = 0
-	var goRoutineCounter int = 0
+	var duplicateCounter int = 0
 	var lastUpdateTime string = services.GetLastUpdateTime(db, "storage1")
+	insertedCounters := make(map[int]chan int, 1)
+	totalCounters := make(map[int]chan int, 1)
+	duplicateCounters := make(map[int]chan int, 1)
 
 exit:
 	for true {
@@ -50,7 +52,7 @@ exit:
 		fmt.Printf("Start processing page %d\n", cursor)
 		var targetUrl string = "https://vmeste.info/api/trpc/announcement.list?batch=1&input="
 
-		targetUrl = targetUrl + url.QueryEscape(`{"0":{"json":{"filters":{"groupId":"969ac93b-90f7-4273-a617-2e8ca21a2d92","isCommercial":false,"isNonCommercial":false,"payment":null,"format":null,"location":null,"rubric":null,"type":"all","searchSlug":"","isOnline":null,"locations":[],"rubrics":[],"inSearch":true,"suggesting":true},"limit":`+strconv.Itoa(parseLimit)+`,"cursor":`+strconv.Itoa(cursor)+`},"meta":{"values":{"filters.isOnline":["undefined"]}}}}`)
+		targetUrl = targetUrl + url.QueryEscape(`{"0":{"json":{"filters":{"groupId":"5837698c-0957-42b3-b5cb-f6b07b81d3c1","payment":[],"isOnline":true,"isEditorsChoice":false,"location":null,"rubric":null,"type":"offers","searchSlug":"","orderBy":"date","isCommercial":false,"isNonCommercial":false,"locations":[],"rubrics":[],"inSearch":true,"suggesting":false},"limit":`+strconv.Itoa(parseLimit)+`,"orderBy":{"sort":"date","order":"DESC"},"cursor":`+strconv.Itoa(cursor)+`}}}`)
 		// Форимируем запрос
 		request, err := http.NewRequest("GET", targetUrl, nil)
 		if err != nil {
@@ -68,6 +70,7 @@ exit:
 		if err != nil {
 			log.Println(err)
 		}
+		//fmt.Println(data)
 
 		// Отджейсоним полученные данные
 		var result []RootField
@@ -86,13 +89,18 @@ exit:
 		}
 
 		// Обработку полученных данных осуществляем в потоках
-		goRoutineCounter++
-		go func() {
+		insertedCounters[cursor] = make(chan int, 1)
+		totalCounters[cursor] = make(chan int, 1)
+		duplicateCounters[cursor] = make(chan int, 1)
+		go func(insertedCounter chan int, totalCounter chan int, duplicateCounter chan int) {
+			insertedCount := 0
+			totalCount := 0
+			duplicateCount := 0
 			for _, item := range contentData.Data {
-				rowCount++
+				totalCount++
 				//fmt.Println(key, item["id"], item["updated"])
 				jsonStr, _ := json.Marshal(item)
-				insetResult, _ := services.InsertToStorage(db, "storage1", forceMode, []services.DbStorageStruct{
+				insetResult, err := services.InsertToStorage(db, "storage1", forceMode, []services.DbStorageStruct{
 					{
 						Id:                   item["id"].(string),
 						LastUpdateInDb:       "",
@@ -103,12 +111,18 @@ exit:
 
 				if insetResult != nil {
 					inserted, _ := insetResult.RowsAffected()
-					rowInsertedCount += inserted
+					insertedCount += int(inserted)
+				}
+
+				if err != nil {
+					duplicateCount++
 				}
 			}
 
-			goRoutineCounter--
-		}()
+			insertedCounter <- insertedCount
+			totalCounter <- totalCount
+			duplicateCounter <- duplicateCount
+		}(insertedCounters[cursor], totalCounters[cursor], duplicateCounters[cursor])
 
 		if cursor == contentData.NextCursor || contentData.NextCursor == 0 {
 			break
@@ -118,8 +132,15 @@ exit:
 	}
 
 	fmt.Printf("Waiting... ")
-	for goRoutineCounter > 0 {
-		time.Sleep(1 * time.Second)
+	for _, counter := range insertedCounters {
+		rowInsertedCount += int64(<-counter)
 	}
-	fmt.Printf("Stored %d records from %d\n", rowInsertedCount, rowCount)
+	for _, counter := range totalCounters {
+		rowCount += int64(<-counter)
+	}
+	for _, counter := range duplicateCounters {
+		duplicateCounter += <-counter
+	}
+
+	fmt.Printf("Stored %d records. DuplicatesOrErrors %d. Total %d\n", rowInsertedCount, duplicateCounter, rowCount)
 }
